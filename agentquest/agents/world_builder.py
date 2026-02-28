@@ -1,9 +1,10 @@
-from pathlib import Path
 from crewai import Agent
+from agentquest.utils import get_configured_llm
 
 def get_world_builder() -> Agent:
     return Agent(
         role='World Builder',
+        llm=get_configured_llm(),
         goal='Create a cohesive setting, lore, factions, and locations based on the world seed.',
         backstory='You are a master world-builder for tabletop RPGs, known for creating incredibly immersive and logical fantasy/sci-fi settings.',
         verbose=True,

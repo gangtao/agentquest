@@ -31,6 +31,7 @@ def play(
     players: str = typer.Option("examples/players.yaml", "--players", "-p", help="Path to the players config YAML file"),
     output: str = typer.Option("output/session", "--output", "-o", help="Directory to save session artifacts (game_state, transcript)"),
     rounds: int = typer.Option(3, "--rounds", "-r", help="Number of rounds to play"),
+    resume: bool = typer.Option(True, "--resume/--new-game", help="Resume from existing game state if present"),
 ):
     """Play a game session using an existing world and player config."""
     console.print("[bold blue]Starting game session...[/bold blue]")
@@ -46,7 +47,7 @@ def play(
             players_data = yaml.safe_load(f)
             player_configs = [PlayerConfig(**p) for p in players_data.get('players', [])]
             
-        crew = GameplayCrew(world_state=world_state, players=player_configs, output_dir=Path(output))
+        crew = GameplayCrew(world_state=world_state, players=player_configs, output_dir=Path(output), resume=resume)
         
         for i in range(rounds):
             if not crew.run_round():
