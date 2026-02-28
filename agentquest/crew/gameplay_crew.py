@@ -79,7 +79,7 @@ class GameplayCrew:
         # Task 3: DM resolves the round
         resolve_task = Task(
             description="Review all player actions. Use your dice roller to determine outcomes if they attempt something difficult. Formulate a final narrative summary of the round and specify any state changes (HP, inventory, location).",
-            expected_output="A narrative resolution of the players' actions, followed by a summary of state changes. Include whether the game is over.",
+            expected_output="A narrative resolution of the players' actions, followed by a summary of state changes. At the very end of your output, you MUST include the exact phrase 'STATUS: GAME_OVER' if the game has ended (e.g. all players are dead), or 'STATUS: CONTINUE' if the game should proceed.",
             agent=self.dm_agent,
             context=player_tasks
         )
@@ -101,8 +101,8 @@ class GameplayCrew:
         self._save_game_state()
         self._append_transcript(f"## Round {self.game_state.round_number - 1}\\n\\n" + resolution_text)
         
-        # Extremely basic game over check (would need a dedicated parser for the RoundResult Pydantic model here)
-        if "game over" in resolution_text.lower():
+        # Check for the explicit game over marker
+        if "STATUS: GAME_OVER" in resolution_text.upper():
             return False
             
         return True
