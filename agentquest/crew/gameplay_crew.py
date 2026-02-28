@@ -1,5 +1,8 @@
+import asyncio
+from typing import Optional
 from pathlib import Path
 from crewai import Crew, Task, Process
+from crewai.tasks.task_output import TaskOutput
 from agentquest.agents import get_dm_agent, get_player_agent
 from agentquest.models import WorldState, PlayerConfig, GameState, CharacterState
 
@@ -9,16 +12,33 @@ class GameplayCrew:
     DM agent orchestrates each round; Player agents respond independently.
     Maintains and persists game_state.json across rounds.
     """
-    def __init__(self, world_state: WorldState, players: list[PlayerConfig], output_dir: Path, resume: bool = True):
+    def __init__(self, world_state: WorldState, players: list[PlayerConfig], output_dir: Path, resume: bool = True, stream_queue: Optional[asyncio.Queue] = None):
         self.world_state = world_state
         self.players_config = players
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.game_state_path = self.output_dir / "game_state.json"
         self.transcript_path = self.output_dir / "transcript.md"
+        self.stream_queue = stream_queue
+        
+        # Step callback for streaming tool usage
+        def step_callback(agent_output):
+            if self.stream_queue:
+                # agent_output can be AgentAction (tool use) or AgentFinish
+                if hasattr(agent_output, 'tool') and agent_output.tool:
+                    tool_msg = f"\n*[System]* **{agent_output.agent}** is using tool `{agent_output.tool}`: {agent_output.tool_input}\n"
+                    # Using a non-blocking put since this is called synchronously by CrewAI
+                    try:
+                        self.stream_queue.put_nowait(tool_msg)
+                    except asyncio.QueueFull:
+                        pass
         
         self.dm_agent = get_dm_agent()
+        self.dm_agent.step_callback = step_callback
+        
         self.player_agents = [get_player_agent(p) for p in self.players_config]
+        for pa in self.player_agents:
+            pa.step_callback = step_callback
         
         if resume and self.game_state_path.exists():
             print(f"Loading existing game state from {self.game_state_path}")
@@ -102,30 +122,72 @@ class GameplayCrew:
         else:
             history_prompt = "\\n\\nHere is what has happened so far:\\n[The adventure is just beginning!]\\n"
         
+        # Task callbacks for streaming final outputs
+        def dm_desc_callback(output: TaskOutput):
+            if self.stream_queue:
+                msg = getattr(output, 'raw', str(output))
+                try:
+                    self.stream_queue.put_nowait(f"### **DM** (Scene Description)\n{msg}\n\n### Player Actions\n")
+                except asyncio.QueueFull:
+                    pass
+
+        def player_action_callback(output: TaskOutput):
+            if self.stream_queue:
+                msg = getattr(output, 'raw', str(output))
+                agent_name = output.agent if hasattr(output, 'agent') else "Player"
+                try:
+                    self.stream_queue.put_nowait(f"**{agent_name}**:\n{msg}\n\n")
+                except asyncio.QueueFull:
+                    pass
+
+        def dm_res_callback(output: TaskOutput):
+            if self.stream_queue:
+                msg = getattr(output, 'raw', str(output))
+                try:
+                    self.stream_queue.put_nowait(f"### **DM** (Resolution)\n{msg}\n\n")
+                except asyncio.QueueFull:
+                    pass
+
         # Task 1: DM describes the scene
         describe_task = Task(
-            description=f"{history_prompt}\\nDescribe the current situation at {self.game_state.current_location}. Round: {self.game_state.round_number}. Provide clear hooks for the players based on recent events.",
+            description=f"{history_prompt}\nDescribe the current situation at {self.game_state.current_location}. Round: {self.game_state.round_number}. Provide clear hooks for the players based on recent events.",
             expected_output="A vivid description of the environment and any immediate events or characters present.",
-            agent=self.dm_agent
+            agent=self.dm_agent,
+            callback=dm_desc_callback
         )
         
         # Parallel Tasks: Players decide their actions
         player_tasks = []
+        
+        # Factory to capture the player name in the callback closure
+        def make_player_callback(p_name: str):
+            def callback(output: TaskOutput):
+                if self.stream_queue:
+                    msg = getattr(output, 'raw', str(output))
+                    try:
+                        self.stream_queue.put_nowait(f"**{p_name}**:\n{msg}\n\n")
+                    except asyncio.QueueFull:
+                        pass
+            return callback
+            
         for i, pa in enumerate(self.player_agents):
+            p_name = self.players_config[i].name
             pt = Task(
-                description=f"{history_prompt}\\nListen to the DM's scene description and the current situation. Decide your next action. Character: {self.players_config[i].name}.",
-                expected_output=f"A short description of {self.players_config[i].name}'s action and any dialogue.",
+                description=f"{history_prompt}\nListen to the DM's scene description and the current situation. Decide your next action. Character: {p_name}.",
+                expected_output=f"A short description of {p_name}'s action and any dialogue.",
                 agent=pa,
-                context=[describe_task]
+                context=[describe_task],
+                callback=make_player_callback(p_name)
             )
             player_tasks.append(pt)
             
         # Task 3: DM resolves the round
         resolve_task = Task(
-            description="Review all player actions. Use your dice roller to determine outcomes if they attempt something difficult. Formulate a final narrative summary of the round and specify any state changes (HP, inventory, location).",
-            expected_output="A narrative resolution of the players' actions, followed by a summary of state changes. At the very end of your output, you MUST include the exact phrase 'STATUS: GAME_OVER' if the game has ended (e.g. all players are dead), or 'STATUS: CONTINUE' if the game should proceed.",
+            description="Review all player actions. Use your dice roller to determine outcomes if they attempt something difficult. Formulate a final narrative summary of the round and specify any state changes (HP, inventory, location). You MUST explicitly list out any dice rolls you made (e.g. 'Garrick rolls Athletics: 1d20+2 = 15').",
+            expected_output="A structured narrative resolution. 1) Start with '### Dice Rolls' and list any tool rolls explicitly with their results (if none, stay brief). 2) Provide the '### Narrative Resolution' of the players' actions. 3) Provide a summary of state changes. At the very end of your output, you MUST include the exact phrase 'STATUS: GAME_OVER' if the game has ended, or 'STATUS: CONTINUE' if the game should proceed.",
             agent=self.dm_agent,
-            context=player_tasks
+            context=player_tasks,
+            callback=dm_res_callback
         )
         
         crew = Crew(
@@ -135,15 +197,38 @@ class GameplayCrew:
             verbose=True
         )
         
+        if self.stream_queue:
+            try:
+                self.stream_queue.put_nowait(f"## Round {self.game_state.round_number}\n\n")
+            except asyncio.QueueFull:
+                pass
+
         result = crew.kickoff()
         
+        # Build structured transcript for this round
+        current_round = self.game_state.round_number
+        round_transcript = f"## Round {current_round}\n\n"
+        
+        # 1. DM Scene Description
+        scene_desc = getattr(describe_task.output, 'raw', str(describe_task.output))
+        round_transcript += f"### **DM** (Scene Description)\n{scene_desc}\n\n"
+            
+        # 2. Player Actions
+        round_transcript += "### Player Actions\n"
+        for i, pt in enumerate(player_tasks):
+            player_name = self.players_config[i].name
+            action = getattr(pt.output, 'raw', str(pt.output))
+            round_transcript += f"**{player_name}**:\n{action}\n\n"
+            
+        # 3. DM Resolution
         resolution_text = str(result)
+        round_transcript += f"### **DM** (Resolution)\n{resolution_text}\n\n"
         
         # Update our simple state representation
         self.game_state.session_history.append(resolution_text)
         self.game_state.round_number += 1
         self._save_game_state()
-        self._append_transcript(f"## Round {self.game_state.round_number - 1}\\n\\n" + resolution_text)
+        self._append_transcript(round_transcript)
         
         # Check for the explicit game over marker
         if "STATUS: GAME_OVER" in resolution_text.upper():

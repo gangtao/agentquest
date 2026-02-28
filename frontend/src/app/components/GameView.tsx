@@ -44,12 +44,46 @@ export default function GameView({ onRefresh }: { onRefresh: () => void }) {
                 throw new Error(await res.text());
             }
 
-            const data = await res.json();
-            if (data.status === "game_over") {
-                alert("Game Over!");
-                onRefresh();
-            } else {
-                fetchState();
+            if (!res.body) throw new Error("No readable stream");
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+
+            // Add a small spacer if we already have transcript content
+            if (transcript.trim().length > 0) {
+                setTranscript(prev => prev + "\n\n---\n\n");
+            }
+
+            let done = false;
+            while (!done) {
+                const { value, done: readerDone } = await reader.read();
+                done = readerDone;
+                if (value) {
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = chunk.split('\n');
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = line.slice(6);
+                            if (data === '[DONE]') {
+                                // Round complete
+                            } else if (data.startsWith('[STATE] ')) {
+                                const stateJson = JSON.parse(data.slice(8));
+                                setGameState(stateJson.game_state);
+                                if (!stateJson.game_continues) {
+                                    alert("Game Over!");
+                                    onRefresh();
+                                }
+                            } else if (data.startsWith('[ERROR] ')) {
+                                setError(data.slice(8));
+                            } else {
+                                // Restore newlines
+                                const textChunk = data.replace(/\\n/g, '\n');
+                                setTranscript((prev) => prev + textChunk);
+                            }
+                        }
+                    }
+                }
             }
         } catch (err: any) {
             setError(err.message || "Failed to step game");

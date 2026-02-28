@@ -93,35 +93,65 @@ def start_play(req: PlayRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+import asyncio
+import threading
+from fastapi.responses import StreamingResponse
+
 @app.post("/api/play/step")
-def play_step():
-    """Runs a single round of the game."""
+async def play_step():
+    """Runs a single round of the game, streaming the actions as Server-Sent Events."""
     global active_gameplay_crew
     
     if not active_gameplay_crew:
         raise HTTPException(status_code=400, detail="Gameplay crew not initialized. Call /api/play/start first.")
         
-    try:
-        continues = active_gameplay_crew.run_round()
-        
-        # Read the latest transcript addition (just the last block)
-        # For a more robust app, we'd stream this, but for now we read the file
-        transcript_content = ""
-        if TRANSCRIPT_PATH.exists():
-            with open(TRANSCRIPT_PATH, "r") as f:
-                content = f.read().split("## Round")
-                if len(content) > 1:
-                    transcript_content = "## Round" + content[-1]
-                else:
-                    transcript_content = content[0]
-                    
-        return {
-            "game_continues": continues,
-            "game_state": active_gameplay_crew.game_state.model_dump(),
-            "latest_transcript": transcript_content
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Create the async queue for streaming
+    stream_queue = asyncio.Queue()
+    active_gameplay_crew.stream_queue = stream_queue
+    
+    # Run the crew in a background thread so it doesn't block the async generator
+    # We must pass the current event loop so the synchronous callbacks can put into the queue
+    loop = asyncio.get_running_loop()
+    
+    def run_crew():
+        try:
+            continues = active_gameplay_crew.run_round()
+            # Signal completion
+            asyncio.run_coroutine_threadsafe(
+                stream_queue.put({"type": "done", "continues": continues}), 
+                loop
+            )
+        except Exception as e:
+            asyncio.run_coroutine_threadsafe(
+                stream_queue.put({"type": "error", "detail": str(e)}), 
+                loop
+            )
+            
+    threading.Thread(target=run_crew, daemon=True).start()
+    
+    async def event_generator():
+        while True:
+            item = await stream_queue.get()
+            
+            if isinstance(item, dict):
+                if item["type"] == "done":
+                    # Send final game state update
+                    state_json = json.dumps({
+                        "game_continues": item["continues"],
+                        "game_state": active_gameplay_crew.game_state.model_dump()
+                    })
+                    yield f"data: [STATE] {state_json}\n\n"
+                    yield "data: [DONE]\n\n"
+                    break
+                elif item["type"] == "error":
+                    yield f"data: [ERROR] {item['detail']}\n\n"
+                    break
+            else:
+                # Replace newlines so JS EventSource parses single data block correctly
+                content = item.replace("\n", "\\n")
+                yield f"data: {content}\n\n"
+                
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/api/state")
 def get_state():
