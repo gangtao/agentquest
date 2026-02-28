@@ -1,0 +1,29 @@
+[project]
+name = "agentquest"
+version = "0.1.0"
+description = "Autonomous multi-agent RPG orchestration framework based on CrewAI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "crewai>=0.80.0",
+    "pydantic>=2.0",
+    "typer>=0.12",
+    "python-dotenv>=1.0",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.0",
+    "ruff>=0.4",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+agentquest = "agentquest.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

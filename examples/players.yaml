@@ -1,0 +1,15 @@
+# examples/players.yaml
+players:
+  - name: "Garrick Stone"
+    character_class: "Fighter"
+    alignment: "Lawful Good"
+    personality: "Stoic, fiercely loyal, deeply superstitious about magic."
+    goal: "Protect the weak and find the person who cursed my sister."
+    backstory: "A former city guard who turned to adventuring after his precinct was wiped out by a necromancer."
+    
+  - name: "Elara Moonwhisper"
+    character_class: "Rogue"
+    alignment: "Chaotic Neutral"
+    personality: "Quick-witted, sarcastic, greedy but with a hidden heart of gold."
+    goal: "Amass enough wealth to buy my own thief guild."
+    backstory: "Grew up on the streets of the capital, surviving by picking pockets and outsmarting the city watch."
